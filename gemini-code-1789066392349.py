@@ -4,6 +4,8 @@ import numpy as np
 from scipy import stats
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
+from bs4 import BeautifulSoup
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
@@ -15,7 +17,7 @@ st.set_page_config(
 st.title("⚽ Terminal Avanzada de Análisis Estadístico para Apuestas Deportivas")
 st.caption("Herramienta Profesional de Modelación Cuantitativa | Tipster Pro Edition")
 
-# --- DATASETS POR DEFECTO (Millonarios vs Deportivo Cali) ---
+# --- DATASETS POR DEFECTO ---
 default_a = {
     'Fecha': ['06/09/2026', '02/09/2026', '30/08/2026', '27/08/2026', '22/08/2026'],
     'GF': [1, 2, 0, 2, 1],
@@ -40,18 +42,28 @@ default_b = {
     'Tarjetas': [3, 6, 3, 2, 4]
 }
 
-# --- SIDEBAR: GESTIÓN Y CÓDIGO DE DATOS ---
+# --- FUNCIÓN DE WEB SCRAPING DE TABLAS ---
+def fetch_tables_from_url(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    response = requests.get(url, headers=headers, timeout=10)
+    response.raise_for_status()
+    tables = pd.read_html(response.text)
+    return tables
+
+# --- SIDEBAR: GESTIÓN DE DATOS ---
 st.sidebar.header("⚙️ Configuración y Datos")
 equipo_a_name = st.sidebar.text_input("Nombre Equipo A", "Millonarios FC")
 equipo_b_name = st.sidebar.text_input("Nombre Equipo B", "Deportivo Cali")
 
-modo_datos = st.sidebar.radio("Fuente de Datos", ["Datos Predeterminados", "Cargar Archivo (CSV/Excel)"])
+modo_datos = st.sidebar.radio("Fuente de Datos", ["Datos Predeterminados", "Cargar Archivo (CSV/Excel)", "🌐 Web Scraping (URL)"])
 
 df_a = pd.DataFrame(default_a)
 df_b = pd.DataFrame(default_b)
 
 if modo_datos == "Cargar Archivo (CSV/Excel)":
-    uploaded_file = st.sidebar.file_uploader("Sube tu archivo con las pestañas o columnas de cada equipo", type=['csv', 'xlsx'])
+    uploaded_file = st.sidebar.file_uploader("Sube tu archivo", type=['csv', 'xlsx'])
     if uploaded_file is not None:
         try:
             if uploaded_file.name.endswith('.xlsx'):
@@ -63,11 +75,30 @@ if modo_datos == "Cargar Archivo (CSV/Excel)":
                 df_b = pd.read_excel(uploaded_file, sheet_name=sheet_b)
             else:
                 df_uploaded = pd.read_csv(uploaded_file)
-                st.sidebar.info("CSV cargado para ambos equipos.")
-                df_a = df_uploaded
-                df_b = df_uploaded
+                df_a, df_b = df_uploaded, df_uploaded
         except Exception as e:
             st.sidebar.error(f"Error al leer el archivo: {e}")
+
+elif modo_datos == "🌐 Web Scraping (URL)":
+    url_input = st.sidebar.text_input("Pega la URL de estadísticas del partido")
+    if url_input:
+        try:
+            with st.spinner("Extrayendo tablas de la web..."):
+                extracted_tables = fetch_tables_from_url(url_input)
+                if len(extracted_tables) >= 2:
+                    table_idx_a = st.sidebar.number_input("Índice Tabla Equipo A", 0, len(extracted_tables)-1, 0)
+                    table_idx_b = st.sidebar.number_input("Índice Tabla Equipo B", 0, len(extracted_tables)-1, 1)
+                    df_a = extracted_tables[table_idx_a]
+                    df_b = extracted_tables[table_idx_b]
+                    st.sidebar.success(f"¡Se encontraron {len(extracted_tables)} tablas exitosamente!")
+                elif len(extracted_tables) == 1:
+                    df_a = extracted_tables[0]
+                    df_b = extracted_tables[0]
+                    st.sidebar.success("Se extrajo 1 tabla para ambos datos.")
+                else:
+                    st.sidebar.warning("No se detectaron tablas públicas en esa URL.")
+        except Exception as e:
+            st.sidebar.error(f"No se pudieron extraer datos de la URL: {e}")
 
 # --- PESTAÑAS PRINCIPALES ---
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -85,6 +116,8 @@ with tab1:
     
     def get_stats_table(df):
         numeric_df = df.select_dtypes(include=[np.number])
+        if numeric_df.empty:
+            return pd.DataFrame()
         stats_dict = {}
         for col in numeric_df.columns:
             series = numeric_df[col].dropna()
@@ -120,8 +153,8 @@ with tab2:
     st.subheader("Modelo de Distribución de Poisson para Marcador Correcto")
     col_p1, col_p2 = st.columns(2)
     
-    default_lambda_a = float(df_a['GF'].mean()) if 'GF' in df_a.columns else 1.2
-    default_lambda_b = float(df_b['GF'].mean()) if 'GF' in df_b.columns else 1.0
+    default_lambda_a = float(df_a['GF'].mean()) if 'GF' in df_a.columns and pd.api.types.is_numeric_dtype(df_a['GF']) else 1.2
+    default_lambda_b = float(df_b['GF'].mean()) if 'GF' in df_b.columns and pd.api.types.is_numeric_dtype(df_b['GF']) else 1.0
     
     with col_p1:
         lambda_a = st.number_input(f"Expected Goals (xG) {equipo_a_name}", value=default_lambda_a, step=0.1)
@@ -184,7 +217,7 @@ with tab3:
             df_reg = 1
             df_res = len(Y) - 2
             ms_reg = ss_reg / df_reg
-            ms_res = ss_res / df_res if df_res > 0 else 0000.1
+            ms_res = ss_res / df_res if df_res > 0 else 0.0001
             f_stat = ms_reg / ms_res if ms_res > 0 else 0
             p_val_f = stats.f.sf(f_stat, df_reg, df_res) if df_res > 0 else 1
             
